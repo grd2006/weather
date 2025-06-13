@@ -4,7 +4,10 @@ import { useState } from "react";
 // Import the main component from react-animated-weather
 import ReactAnimatedWeather from 'react-animated-weather';
 
-// Removed all imports from 'react-icons/wi', 'react-icons/md', 'react-icons/fa'
+//Tetris Loading Animation
+import dynamic from 'next/dynamic';
+import weatherAnimation from '../public/animations/your-animation-file.json';
+const Animation = dynamic(() => import('./components/Animation'), { ssr: false });
 
 const apiKey = process.env.NEXT_PUBLIC_PIRATEWEATHER_API_KEY;
 
@@ -83,12 +86,19 @@ export default function Home() {
   const [sunsetTime, setSunsetTime] = useState(null); // 'daily.data[0].sunsetTime' (Unix timestamp)
   const [moonPhase, setMoonPhase] = useState(null); // 'daily.data[0].moonPhase' (0-1)
 
+  // State to hold the matching city name
+  const [matchingCities, setMatchingCities] = useState([]);
+
 
   // State to manage loading status for any async operation (weather, geo, geocode)
   const [loading, setLoading] = useState(false);
 
   // State to manage potential errors from any operation
   const [error, setError] = useState(null);
+
+  // Add loading state for weather
+  const [isLoadingWeather, setIsLoadingWeather] = useState(false);
+  const [isLoadingSimilar, setIsLoadingSimilar] = useState(false);
 
 
   // Helper function to reset all weather data states
@@ -109,6 +119,7 @@ export default function Home() {
     setSunriseTime(null);
     setSunsetTime(null);
     setMoonPhase(null);
+    setMatchingCities([]);
   }
 
 
@@ -166,6 +177,9 @@ export default function Home() {
       // Set the location name for the card header
       setLocationName(locationDisplayName || `${parseFloat(lat).toFixed(2)}, ${parseFloat(lon).toFixed(2)}`); // Default to formatted coords if no name
 
+      // Fetch the matching city name based on coordinates
+      await fetchMatchingCity(lat, lon);
+
 
     } catch (err) {
       console.error("Fetch error:", err);
@@ -198,66 +212,86 @@ export default function Home() {
     fetchWeatherApi(inputLat, inputLon);
   };
 
-
-  // Function to trigger geolocation and fetch weather based on location
-  const fetchWeatherByLocation = () => {
-    if (!navigator.geolocation) {
-      setError('Geolocation is not supported by your browser.');
-      clearWeatherData();
-      return;
-    }
-
-    // Reset states before requesting
-    clearWeatherData();
-    setError(null);
-    setLoading(true); // Use main loading state
-
-
-    // Request the user's current position
-    navigator.geolocation.getCurrentPosition(
-      (position) => {
-        // Success callback
-        const lat = position.coords.latitude;
-        const lon = position.coords.longitude;
-
-        // Optional: Update the input fields so the user sees the coordinates found
-        // Keep them as strings for input fields
-        setInputLat(lat.toString());
-        setInputLon(lon.toString());
-
-        // Now use the obtained lat/lon to fetch weather via the helper function
-        // Pass a placeholder location name
-        // fetchWeatherApi handles setting loading:false in its finally
-        fetchWeatherApi(lat, lon, 'Your Current Location');
-
-      },
-      (error) => {
-        // Error callback
-        setLoading(false); // Stop main loading
-        clearWeatherData();
-
-        // Handle specific geolocation errors
-        switch (error.code) {
-          case error.PERMISSION_DENIED:
-            setError("Permission to access location was denied. Please enable location permissions in your browser settings.");
-            break;
-          case error.POSITION_UNAVAILABLE:
-            setError("Location information is unavailable.");
-            break;
-          case error.TIMEOUT:
-            setError("The request to get user location timed out.");
-            break;
-          default:
-            setError(`An unknown error occurred getting your location: ${error.message}`);
-        }
-        console.error("Geolocation error:", error);
-      },
-      { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 } // Optional configuration
-    );
+  // Update the form submit handler
+  const handleSubmit = async (e) => {
+      e.preventDefault();
+      await fetchWeatherFromInput();
   };
 
-  // Function to fetch coordinates by city name and then fetch weather
-  const fetchWeatherByCity = async () => {
+  // Function to trigger geolocation and fetch weather based on location
+  const fetchWeatherByLocation = async () => {
+    if ("geolocation" in navigator) {
+        try {
+            const position = await new Promise((resolve, reject) => {
+                navigator.geolocation.getCurrentPosition(resolve, reject);
+            });
+            
+            const { latitude, longitude } = position.coords;
+            setInputLat(latitude.toString());
+            setInputLon(longitude.toString());
+            
+            // Only fetch current weather
+            await fetchCurrentWeather(latitude, longitude);
+            
+        } catch (error) {
+            console.error("Error getting location:", error);
+            alert("Could not get your location. Please check your browser settings.");
+        }
+    } else {
+        alert("Geolocation is not supported by your browser");
+    }
+};
+
+// Separate weather fetch function
+const fetchCurrentWeather = async (lat, lon) => {
+    setIsLoadingWeather(true);
+    try {
+        const url = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&current=temperature_2m,relative_humidity_2m,apparent_temperature,precipitation,weather_code,wind_speed_10m,wind_direction_10m`;
+        const response = await fetch(url);
+        const data = await response.json();
+
+        if (data.current) {
+            setCurrentTemperature(data.current.temperature_2m);
+            setHumidity(data.current.relative_humidity_2m);
+            setWindSpeed(data.current.wind_speed_10m);
+            // Set other weather states...
+        }
+    } catch (error) {
+        console.error('Error fetching weather:', error);
+    } finally {
+        setIsLoadingWeather(false);
+    }
+};
+
+// Update form submit handler
+const handleWeatherSearch = async (e) => {
+    e.preventDefault();
+    if (!inputLat || !inputLon) return;
+    
+    await fetchCurrentWeather(parseFloat(inputLat), parseFloat(inputLon));
+};
+
+// Add a separate button for finding similar cities
+const handleFindSimilarCities = async () => {
+    if (!inputLat || !inputLon) return;
+    
+    try {
+        const response = await fetch(
+            `/api/weather-match?lat=${inputLat}&lon=${inputLon}&city=${cityInput}`
+        );
+        const data = await response.json();
+
+        if (data.matching_cities) {
+            setMatchingCities(data.matching_cities);
+        }
+    } catch (error) {
+        console.error('Error finding similar cities:', error);
+    }
+};
+
+
+// Function to fetch coordinates by city name and then fetch weather
+const fetchWeatherByCity = async () => {
     if (!cityInput.trim()) {
       setError('Please enter a city name.');
       clearWeatherData();
@@ -322,11 +356,48 @@ export default function Home() {
   };
 
 
+  // Function to fetch the matching city name based on coordinates
+  const fetchMatchingCity = async (lat, lon) => {
+    try {
+        const response = await fetch(`/api/weather-match?lat=${lat}&lon=${lon}&city=${cityInput}`);
+        const data = await response.json();
+        if (data.matching_cities) {
+            setMatchingCities(data.matching_cities);
+        }
+    } catch (error) {
+        console.error('Error fetching matching cities:', error);
+    }
+  };
+
+  // Separate the matching cities fetch from the main weather fetch
+  const fetchSimilarCities = async () => {
+    if (!inputLat || !inputLon) {
+        alert('Please fetch weather data first');
+        return;
+    }
+
+    setIsLoadingSimilar(true);
+    try {
+        const response = await fetch(
+            `/api/weather-match?lat=${inputLat}&lon=${inputLon}&city=${cityInput}`
+        );
+        const data = await response.json();
+        if (data.matching_cities) {
+            setMatchingCities(data.matching_cities);
+        }
+    } catch (error) {
+        console.error('Error fetching similar cities:', error);
+    } finally {
+        setIsLoadingSimilar(false);
+    }
+  };
+
   // Determine if weather data should be shown (check if apparent temperature is available as a key indicator)
   const showWeatherData = apparentTemperature !== null && apparentTemperature !== undefined;
 
   // Determine if the initial message should be shown
    const showInitialMessage = !loading && !error && !showWeatherData;
+
 
 
   return (
@@ -412,14 +483,18 @@ export default function Home() {
         )}
 
         {loading && !error && ( // Only show loading if there's no current error message
-            <p className="text-center text-blue-200">
-                Fetching weather data...
-            </p>
+            <><p className="text-center text-blue-200">
+                      Fetching weather data...
+                  </p><div className="w-72 h-72 mx-auto mb-8">
+                          <Animation
+                              animationData={weatherAnimation}
+                              className="w-full h-full" />
+                      </div></>
             
         )}
 
         {showInitialMessage && (
-           <p className="text-center text-gray-200">
+           <p className="text-center text-gray-800">
                Enter coordinates, a city name, or click 'Get Weather by My Location'.
             </p>
         )}
@@ -567,6 +642,31 @@ export default function Home() {
               ) : null}
 
             </div>
+
+            {/* Matching City Display - New Section */}
+            {matchingCities.length > 0 && (
+                <div className="mt-6 p-4 bg-white/30 rounded-lg backdrop-blur-sm">
+                    <h3 className="text-lg font-semibold mb-3 text-gray-800">
+                        Cities with Similar Weather Conditions:
+                    </h3>
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        {matchingCities.map((match, index) => (
+                            <div 
+                                key={index} 
+                                className="flex items-center justify-between p-3 bg-white/50 rounded-lg"
+                            >
+                                <div>
+                                    <span className="font-medium text-gray-800">{match.city}</span>
+                                    <span className="text-sm text-gray-600 ml-2">({match.continent})</span>
+                                </div>
+                                <span className="text-sm text-gray-600">
+                                    Similarity: {(100 - match.difference).toFixed(1)}%
+                                </span>
+                            </div>
+                        ))}
+                    </div>
+                </div>
+            )}
           </div>
         )}
       </div>
